@@ -6,120 +6,167 @@
  * Code Source: https://gist.github.com/krdarrah/314027798992a8ee29cc05a4cb47960f
  */
 
-// Include Particle Device OS APIs
-#include "Particle.h"
+/* Includes ------------------------------------------------------------------ */
+#include "Particle.h"       // Include Particle Device OS APIs
+SYSTEM_MODE(AUTOMATIC);     // Let Device OS manage the connection to the Particle Cloud
+SYSTEM_THREAD(ENABLED);     // Run the application and system concurrently in separate threads
 
-// Let Device OS manage the connection to the Particle Cloud
-SYSTEM_MODE(AUTOMATIC);
+/* Defines ------------------------------------------------------------------- */
+#define LOW_BATTERY_NOTIFICATION    10.0f       // send pushover notification when battery drops below
+#define BATTERY_HYSTERESIS          2.0f        // hysteresis to prevent mutiple messages
 
-// Run the application and system concurrently in separate threads
-SYSTEM_THREAD(ENABLED);
+/* Macros -------------------------------------------------------------------- */
 
-// Show system, cloud connectivity, and application logs over USB
-// View logs with CLI using 'particle serial monitor --follow'
-SerialLogHandler logHandler(LOG_LEVEL_INFO);
+/* Typedefs ------------------------------------------------------------------ */
 
-// Power Monitoring Code Below -----------------------------------------------
-String str1,str2;
+/* Global Variables ---------------------------------------------------------- */
+SerialLogHandler logHandler(LOG_LEVEL_INFO);    // Show system, cloud connectivity, and application logs over USB
 
-bool onUSB = false;
-bool onBattery = false;
-bool lowBattery = false;
-unsigned long pwrCheckTimeStart;//to check power every 10sec
+/* Function Prototypes ------------------------------------------------------- */
+void check_power_source(void);
+void check_battery_charge(void);
+void send_notification(const char * title, const char * message);
 
-// function prototypes
-void sendData(void);
-float battery_charge(void);
-
+/* Setup --------------------------------------------------------------------- */
 void setup() {
-
-    /* publish variables for Particle dashboard viewing*/
-    Particle.variable("battery", battery_charge);
-
-    // INITIAL POWER CHECK 
-    int powerSource = System.powerSource();
-    if (powerSource == POWER_SOURCE_BATTERY) {// ON BATTERY
-        onBattery = true;
-        onUSB = false;
+    /* get power source at boot */
+    if (System.powerSource() == POWER_SOURCE_BATTERY) {
+        send_notification("PDC Power Monitor Booting...", "Power Source: battery");
+        Log.info("Battery power source at boot");
+    } else {
+        send_notification("PDC Power Monitor Booting...", "Power Source: external");
+        Log.info("External power source at boot");
     }
-    else{// ON USB
-        onBattery = false;
-        onUSB = true;
-    }
-    
-    if(onBattery){//bootup message alert so we know things are back online
-         str1 = "PDC Booting...";
-         str2 = "No AC Power";
-         sendData();
-    }else{
-         str1 = "PDC Booting...";
-         str2 = "AC Power Good";
-         sendData();
-    }
-    
-    pwrCheckTimeStart = millis();
-}
+} // setup()
 
+/* Loop ---------------------------------------------------------------------- */
 void loop() {
-  // POWER CHECK
-  if(millis()-pwrCheckTimeStart>10000){
-    pwrCheckTimeStart = millis();
-    int powerSource = System.powerSource();
-    if (powerSource == POWER_SOURCE_BATTERY) {// ON BATTERY
-        if(!onBattery && onUSB){// CHANGED FROM USB TO BATTERY
-         onBattery = true;
-         onUSB = false;
-         str1 = "PDC";
-         str2 = "AC Power Lost";
-         sendData();
+    check_power_source();
+    check_battery_charge();
+}
+
+/* check power source, send notification when power source changes ----------- */
+void check_power_source(void) {
+    static system_tick_t last_pwr_check = 0;                // last time power source was checked
+    std::chrono::milliseconds pwr_check_interval = 1min;    // rate to check power source and send notifications 
+
+    static bool power_source_external = false;              // power source is Vin or USB
+    static bool power_source_battery = false;               // power source is internal battery
+
+    if ((millis() - last_pwr_check) >= pwr_check_interval.count()) {
+        last_pwr_check = millis();
+
+        // check power source
+        if (System.powerSource() == POWER_SOURCE_BATTERY) {
+            power_source_battery = true;                    // using battery power source
+
+            if (power_source_external) {                    // switching from using external power
+                power_source_external = false;
+                send_notification("PDC Power Monitor", "AC power lost");
+                Log.info("using battery power source");
+            }
+        } else {
+            power_source_external = true;                   // using external power source
+
+            if (power_source_battery) {                     // switched from using battery power
+                power_source_battery = false;
+                send_notification("PDC Power Monitor", "AC power is on");
+                Log.info("external power source connected");
+            }
         }
-    }else if(onBattery && !onUSB){// CHANGED FROM BATTERY TO USB
-        onBattery = false;
-        onUSB = true;
-        str1 = "PDC";
-        str2 = "AC Power is On";
-        sendData();
     }
+}
+
+/* check battery charge, send a notification on low battery ------------------ */
+void check_battery_charge(void) {
+    static system_tick_t last_battery_check = 0;                // last time battery charge was checked
+    std::chrono::milliseconds battery_check_interval = 30s;     // rate to check battery charge and send notification if low
+
+    static int last_battery_state;                              // keep track of previous battery state to only send notification once
+    static bool low_battery = false;                            // flag to send a push notification once
+
+    if ((millis() - last_battery_check) >= battery_check_interval.count()) {
+        last_battery_check = millis();
+
+        if (last_battery_state != System.batteryState()) {      // battery state has changed, send a notification 
+            last_battery_state = System.batteryState();
+
+            switch (System.batteryState()) {
+                case BATTERY_STATE_UNKNOWN:
+                    send_notification("PDC Power Monitor", "battery state is unknown!");
+                    Log.info("battery state unknown");
+                    break;
+                
+                case BATTERY_STATE_NOT_CHARGING:
+                    send_notification("PDC Power Monitor", "battery is not charging");
+                    Log.info("battery is not charging");
+                    break;
+
+                case BATTERY_STATE_CHARGING:
+                    // send_notification("PDC", "battery is charging");
+                    Log.info("battery is charging");
+                    break;
+
+                case BATTERY_STATE_CHARGED:
+                    // send_notification("PCD", "battery is charged");
+                    Log.info("battery charged");
+                    break;
+
+                case BATTERY_STATE_DISCHARGING:
+                    // send_notification("PCD", "battery is discharging");
+                    Log.info("battery is discharging");
+                    break;
+                
+                case BATTERY_STATE_FAULT:
+                    send_notification("PDC Power Monitor", "battery fault!");
+                    Log.error("battery fault");
+                    break;
+
+                case BATTERY_STATE_DISCONNECTED:
+                    send_notification("PDC Power Monitor", "battery is disconnected");
+                    Log.info("battery is disconnected");
+                    break;
+
+                default:
+                    break;
+            }
+        }
+
+        if (System.batteryCharge() < LOW_BATTERY_NOTIFICATION) {    // battery charge is below 10%, send notification
+            if (!low_battery) {                                     // only send a notification if battery was not previously low
+                low_battery = true;
+                send_notification("PDC Power Monitor", "Low Battery");
+            }
+        }
+
+        // reset low battery on charging with a little hysteresis
+        if (System.batteryState() >= (LOW_BATTERY_NOTIFICATION + BATTERY_HYSTERESIS)) {
+            low_battery = false;
+        }
+    }
+}
+
+/* send a pushover notification ---------------------------------------------- */
+void send_notification(const char * title, const char * message) {
+    unsigned long startConnectTime = millis();
+
+    Log.info(message);
+
+    /* assemble packet for pushover notification */
+    String pushoverPacket = "[{\"key\":\"title\", \"value\":\"";
+    pushoverPacket.concat(title);
+    pushoverPacket.concat("\"},");
+    pushoverPacket.concat("{\"key\":\"message\", \"value\":\"");
+    pushoverPacket.concat(message);
+    pushoverPacket.concat("\"}]");
     
-    //and also check battery voltage 
-    FuelGauge fuel;
-    float batteryVoltage = fuel.getVCell();
-    if(batteryVoltage < 3.5){// if less than this, send an alert 
-        if(!lowBattery){
-            lowBattery=true;
-            str1 = "PDC";
-            str2 = "Low Battery";
-            sendData();
-        }
-    }else if(batteryVoltage>3.7){//little hysteresis to prevent multiple messages
-        lowBattery=false;
+    // check connection before publishing
+    // Particle.publish can block for long periods if no connection (up to 10 minutes)
+    if (Particle.connected()) {
+        Particle.publish("power_outage", pushoverPacket, PRIVATE);  // then send to push safer so we get the notifications on our mobile devices
+        Log.info("%s %s", title, message);
+        Log.info("%lu ms to connect", millis() - startConnectTime);
+    } else {
+        Log.warn("Particle Cloud disconnected");
     }
-  }
-  //********************
-}
-
-void sendData(){
-     unsigned long startConnectTime = millis();
-     char pushMessage[50], pushName[50];
-     str1.toCharArray(pushName, str1.length() + 1);
-     str2.toCharArray(pushMessage, str2.length() + 1);
-     
-     Serial.println(str1);
-     Serial.println(str2);
-     
-     String pushoverPacket = "[{\"key\":\"title\", \"value\":\"";
-     pushoverPacket.concat(str1);
-     pushoverPacket.concat("\"},");
-     pushoverPacket.concat("{\"key\":\"message\", \"value\":\"");
-     pushoverPacket.concat(str2);
-     pushoverPacket.concat("\"}]");
-     Particle.publish("power_outage", pushoverPacket, PRIVATE);//then send to push safer so we get the notifications on our mobile devices
-
-     Serial.print(millis() - startConnectTime);
-     Serial.println("ms to connect");
-}
-
-/* return battery charge*/
-float battery_charge(void) {
-    return System.batteryCharge();
 }
