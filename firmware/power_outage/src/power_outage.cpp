@@ -11,6 +11,8 @@
 SYSTEM_MODE(AUTOMATIC);     // Let Device OS manage the connection to the Particle Cloud
 SYSTEM_THREAD(ENABLED);     // Run the application and system concurrently in separate threads
 
+#include "LocalTimeRK.h"    // local time library, handles time zone and DST
+
 /* Defines ------------------------------------------------------------------- */
 #define LOW_BATTERY_NOTIFICATION    10.0f       // send pushover notification when battery drops below
 #define BATTERY_HYSTERESIS          2.0f        // hysteresis to prevent mutiple messages
@@ -22,6 +24,8 @@ SYSTEM_THREAD(ENABLED);     // Run the application and system concurrently in se
 /* Global Variables ---------------------------------------------------------- */
 SerialLogHandler logHandler(LOG_LEVEL_INFO);    // Show system, cloud connectivity, and application logs over USB
 
+LocalTimeSchedule statusSchedule;               // time based scheduler for weekly status
+
 /* Function Prototypes ------------------------------------------------------- */
 void check_power_source(void);
 void check_battery_charge(void);
@@ -29,6 +33,17 @@ void send_notification(const char * title, const char * message);
 
 /* Setup --------------------------------------------------------------------- */
 void setup() {
+    // Set timezone to the Eastern United States
+    LocalTime::instance().withConfig(LocalTimePosixTimezone("EST5EDT,M3.2.0/2:00:00,M11.1.0/2:00:00"));
+
+    // send out weekly status every Sunday at 9am
+    statusSchedule.withTime(LocalTimeHMSRestricted("9:00", LocalTimeRestrictedDate(LocalTimeDayOfWeek::MASK_SUNDAY)));
+
+    // wait for cloud connection
+    while(!Particle.connected()) {
+        delay(10);
+    }
+
     /* get power source at boot */
     if (System.powerSource() == POWER_SOURCE_BATTERY) {
         send_notification("PDC Power Monitor Booting...", "Power Source: battery");
@@ -41,8 +56,16 @@ void setup() {
 
 /* Loop ---------------------------------------------------------------------- */
 void loop() {
-    check_power_source();
-    check_battery_charge();
+    // Particle.publish can block for long periods if no connection (up to 10 minutes)
+    if (Particle.connected()) {
+        check_power_source();
+        check_battery_charge();
+    }
+
+    // send out weekly status
+    if (statusSchedule.isScheduledTime() && Particle.connected()) {
+        Particle.publish("PDC Power Monitor", "Status Update: OK");
+    }
 }
 
 /* check power source, send notification when power source changes ----------- */
@@ -160,13 +183,7 @@ void send_notification(const char * title, const char * message) {
     pushoverPacket.concat(message);
     pushoverPacket.concat("\"}]");
     
-    // check connection before publishing
-    // Particle.publish can block for long periods if no connection (up to 10 minutes)
-    if (Particle.connected()) {
-        Particle.publish("power_outage", pushoverPacket, PRIVATE);  // then send to push safer so we get the notifications on our mobile devices
-        Log.info("%s %s", title, message);
-        Log.info("%lu ms to connect", millis() - startConnectTime);
-    } else {
-        Log.warn("Particle Cloud disconnected");
-    }
+    Particle.publish("power_outage", pushoverPacket, PRIVATE);  // then send to push safer so we get the notifications on our mobile devices
+    Log.info("%s %s", title, message);
+    Log.info("%lu ms to connect", millis() - startConnectTime);
 }
