@@ -6,5 +6,6 @@
     },
     "particle.targetPlatform": "boron",
     "particle.targetDevice": "power_monitor_01",
-    "particle.firmwareVersion": "6.1.1"
+    "particle.firmwareVersion": "6.1.1",
+    "editor.fontFamily": "'Source Code Pro'",
 }
