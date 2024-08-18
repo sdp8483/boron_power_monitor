@@ -11,11 +11,17 @@
 SYSTEM_MODE(AUTOMATIC);     // Let Device OS manage the connection to the Particle Cloud
 SYSTEM_THREAD(ENABLED);     // Run the application and system concurrently in separate threads
 
-#include "LocalTimeRK.h"    // local time library, handles time zone and DST
-
 /* Defines ------------------------------------------------------------------- */
 #define LOW_BATTERY_NOTIFICATION    10.0f       // send pushover notification when battery drops below
 #define BATTERY_HYSTERESIS          2.0f        // hysteresis to prevent mutiple messages
+
+#define SUNDAY                      1
+#define MONDAY                      2
+#define TUESDAY                     3
+#define WEDNESDAY                   4
+#define THURSDAY                    5
+#define FRIDAY                      6
+#define SATURDAY                    7
 
 /* Macros -------------------------------------------------------------------- */
 
@@ -24,25 +30,27 @@ SYSTEM_THREAD(ENABLED);     // Run the application and system concurrently in se
 /* Global Variables ---------------------------------------------------------- */
 SerialLogHandler logHandler(LOG_LEVEL_INFO);    // Show system, cloud connectivity, and application logs over USB
 
-LocalTimeSchedule statusSchedule;               // time based scheduler for weekly status
-
 /* Function Prototypes ------------------------------------------------------- */
-void check_power_source(void);
-void check_battery_charge(void);
+void check_power_source(void);      // send notification when power source changes
+void check_battery_charge(void);    // send low battery notification
+void status_update(void);           // send weekly notification that device is alive
 void send_notification(const char * title, const char * message);
+String get_time(void);              // send time string to Particle console
 
 /* Setup --------------------------------------------------------------------- */
 void setup() {
-    // Set timezone to the Eastern United States
-    LocalTime::instance().withConfig(LocalTimePosixTimezone("EST5EDT,M3.2.0/2:00:00,M11.1.0/2:00:00"));
-
-    // send out weekly status every Sunday at 9am
-    statusSchedule.withTime(LocalTimeHMSRestricted("9:00", LocalTimeRestrictedDate(LocalTimeDayOfWeek::MASK_SUNDAY)));
-
     // wait for cloud connection
     while(!Particle.connected()) {
         delay(10);
     }
+
+    // setup timezone
+    Time.zone(-5);          // Set time zone to eastern USA
+    Time.setDSTOffset(1);   // set daylight savings time offset
+    Time.beginDST();        // begin DST
+
+    // expose time string to particle console
+    Particle.variable("time", get_time);
 
     /* get power source at boot */
     if (System.powerSource() == POWER_SOURCE_BATTERY) {
@@ -60,11 +68,7 @@ void loop() {
     if (Particle.connected()) {
         check_power_source();
         check_battery_charge();
-    }
-
-    // send out weekly status
-    if (statusSchedule.isScheduledTime() && Particle.connected()) {
-        Particle.publish("PDC Power Monitor", "Status Update: OK");
+        status_update();
     }
 }
 
@@ -169,6 +173,35 @@ void check_battery_charge(void) {
     }
 }
 
+/* send a weekly 'im alive' notification ------------------------------------- */
+void status_update(void) {
+    static system_tick_t last_check = 0;                // last system tick that the time was checked
+    std::chrono::milliseconds check_interval = 15min;   // rate to check if it is time to send status
+
+    static bool status_sent = false;                    // flag to send only one notification per sunday
+
+    if (millis() - last_check >= check_interval.count()) {
+        last_check = millis();
+
+        /* make sure time is set correctly first */
+        if (Time.isValid()) {
+            /* only send on sundays after 9am dst */
+            if ((Time.weekday() == SUNDAY) && (Time.hour() >= 9)) {
+                if (!status_sent) {
+                    status_sent = true;
+
+                    send_notification("PDC Power Monitor", "I'm Alive and Well!");
+                }
+            }
+
+            /* reset flag when not sunday */
+            if (status_sent && (Time.weekday() != SUNDAY)) {
+                status_sent = false;
+            }
+        }
+    }
+}
+
 /* send a pushover notification ---------------------------------------------- */
 void send_notification(const char * title, const char * message) {
     unsigned long startConnectTime = millis();
@@ -186,4 +219,9 @@ void send_notification(const char * title, const char * message) {
     Particle.publish("power_outage", pushoverPacket, PRIVATE);  // then send to push safer so we get the notifications on our mobile devices
     Log.info("%s %s", title, message);
     Log.info("%lu ms to connect", millis() - startConnectTime);
+}
+
+/* return local time string for Particle Console ----------------------------- */
+String get_time(void) {
+    return Time.timeStr();
 }
